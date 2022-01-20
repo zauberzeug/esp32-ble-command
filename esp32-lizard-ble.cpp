@@ -1,0 +1,214 @@
+#include "esp32-lizard-ble.h"
+
+#include <cassert>
+
+#include <esp_bt.h>
+#include <esp_log.h>
+#include <esp_nimble_hci.h>
+#include <host/ble_hs.h>
+#include <host/util/util.h>
+#include <nimble/nimble_port.h>
+#include <nimble/nimble_port_freertos.h>
+#include <services/gap/ble_svc_gap.h>
+#include <services/gatt/ble_svc_gatt.h>
+
+#include <zauber/ble/gatts.h>
+#include <zauber/ble/uuid.h>
+#include <zauber/frtos-util.h>
+#include <zauber/util.h>
+
+namespace LizardBle {
+
+static constexpr std::string_view deviceName{"Robotbrain/Lizard"};
+static constexpr ble_uuid128_t serviceUuid{"23014ccc-4677-4864-b4c1-8f772b373fac"_uuid128};
+static constexpr ble_uuid128_t characteristicUuid{"37107598-7030-46d3-b688-e3664c1712f0"_uuid128};
+static constexpr esp_power_level_t defaultPowerLevel{ESP_PWR_LVL_P9};
+
+static const char TAG[]{"LizardBle"};
+
+using namespace ZZ;
+using namespace FrtosUtil;
+
+static uint8_t ownAddrType;
+static CommandCallback clientCallback;
+
+static auto advertise() -> void;
+
+static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
+    switch (event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        /* A new connection was established or a connection attempt failed. */
+        ESP_LOGV(TAG, "connection %s; status=%d",
+                 event->connect.status == 0 ? "established" : "failed",
+                 event->connect.status);
+
+        if (event->connect.status == 0) {
+            /* Max packet length, min transmission time */
+            ble_gap_set_data_len(event->connect.conn_handle,
+                                 0xFB, 0x0148);
+        }
+
+        if (event->connect.status != 0) {
+            /* Connection failed; resume advertising. */
+            advertise();
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_DISCONNECT:
+        ESP_LOGV(TAG, "disconnect; reason=%d", event->disconnect.reason);
+
+        /* Connection terminated; resume advertising. */
+        advertise();
+        return 0;
+
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        ESP_LOGV(TAG, "advertise complete; reason=%d",
+                 event->adv_complete.reason);
+        advertise();
+        return 0;
+
+    case BLE_GAP_EVENT_MTU:
+        ESP_LOGV(TAG, "mtu update event; conn_handle=%d cid=%d mtu=%d",
+                 event->mtu.conn_handle,
+                 event->mtu.channel_id,
+                 event->mtu.value);
+        return 0;
+    }
+
+    return 0;
+}
+
+static auto advertise() -> void {
+    ble_hs_adv_fields fields{};
+
+    fields.flags = BLE_HS_ADV_F_DISC_GEN |
+                   BLE_HS_ADV_F_BREDR_UNSUP;
+
+    fields.tx_pwr_lvl_is_present = 1;
+    fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
+
+    fields.name = reinterpret_cast<const uint8_t *>(deviceName.data());
+    fields.name_len = deviceName.length();
+    fields.name_is_complete = 1;
+
+    static constexpr ble_uuid16_t alertUuid{"1811"_uuid16};
+    fields.uuids16 = &alertUuid;
+    fields.num_uuids16 = 1;
+    fields.uuids16_is_complete = 1;
+
+    int rc;
+    rc = ble_gap_adv_set_fields(&fields);
+
+    if (rc != 0) {
+        ESP_LOGE(TAG, "error setting advertisement data; rc=%d", rc);
+        return;
+    }
+
+    /* Begin advertising. */
+    ble_gap_adv_params advParams{};
+    advParams.conn_mode = BLE_GAP_CONN_MODE_UND;
+    advParams.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    rc = ble_gap_adv_start(ownAddrType, NULL, BLE_HS_FOREVER,
+                           &advParams, onGapEvent, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "error enabling advertisement; rc=%d", rc);
+        return;
+    }
+}
+
+Task<NIMBLE_STACK_SIZE> hostTask{
+    "ble_host",
+    Core::PRO,
+    []() {
+        /* This function will return only when nimble_port_stop() is executed */
+        nimble_port_run();
+
+        /* Cleanup */
+        nimble_port_deinit();
+        Task<>::haltCurrent();
+    },
+};
+
+static const ZZ::Ble::Gatts::Service lizardComService{
+    serviceUuid,
+    {
+        ZZ::Ble::Gatts::Characteristic{
+            characteristicUuid,
+            BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+            [](std::uint16_t, std::uint16_t, ble_gatt_access_ctxt *ctx) -> int {
+                const std::string_view command{reinterpret_cast<char *>(ctx->om->om_data), ctx->om->om_len};
+                clientCallback(command);
+
+                return 0;
+            },
+        },
+    },
+};
+
+const std::array services{
+    lizardComService.def(),
+    ble_gatt_svc_def{},
+};
+
+auto init(CommandCallback onCommand) -> void {
+    clientCallback = onCommand;
+
+    ESP_ERROR_CHECK(esp_nimble_hci_and_controller_init());
+
+    nimble_port_init();
+
+    /* Initialize the NimBLE host configuration. */
+
+    ble_hs_cfg.reset_cb = [](int reason) {
+        ESP_LOGV(TAG, "Resetting state; reason=%d", reason);
+    };
+
+    ble_hs_cfg.sync_cb = []() {
+        int rc;
+
+        rc = ble_hs_util_ensure_addr(0);
+        assert(rc == 0);
+
+        /* Figure out address to use while advertising (no privacy for now) */
+        rc = ble_hs_id_infer_auto(0, &ownAddrType);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "error determining address type; rc=%d", rc);
+            return;
+        }
+
+        /* Begin advertising. */
+        advertise();
+    };
+
+    ble_hs_cfg.gatts_register_cb = nullptr;
+    ble_hs_cfg.store_status_cb = nullptr;
+    ble_hs_cfg.sm_sc = 0;
+
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+
+    int rc;
+
+    rc = ble_gatts_count_cfg(services.data());
+    assert(rc == 0);
+
+    rc = ble_gatts_add_svcs(services.data());
+    assert(rc == 0);
+
+    rc = ble_svc_gap_device_name_set("RobotBrain/Lizard");
+    assert(rc == 0);
+
+    /* Set appearance to rice cooker */
+    rc = ble_svc_gap_device_appearance_set(0x090E);
+    assert(rc == 0);
+
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, defaultPowerLevel);
+
+    hostTask.run();
+}
+
+auto fini() -> void {
+    nimble_port_stop();
+}
+
+} // namespace LizardBle

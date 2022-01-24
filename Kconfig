@@ -1,0 +1,17 @@
+menu "Zauber BLE command module"
+
+config ZZ_BLE_COM_SVC_UUID
+    string
+    prompt "Service UUID"
+    default "23014ccc-4677-4864-b4c1-8f772b373fac"
+    help
+        The component defines a single BLE service; this is its UUID
+
+config ZZ_BLE_COM_CHR_UUID
+    string
+    prompt "Characteristic UUID"
+    default "37107598-7030-46d3-b688-e3664c1712f0"
+    help
+        With the single service, the component defines a single, writable characteristic to which commands are to be written; this is its UUID
+
+endmenu

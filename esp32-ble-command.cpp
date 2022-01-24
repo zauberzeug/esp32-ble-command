@@ -17,11 +17,13 @@
 #include <zauber/frtos-util.h>
 #include <zauber/util.h>
 
+#include "sdkconfig.h"
+
 namespace LizardBle {
 
-static constexpr std::string_view deviceName{"Robotbrain/Lizard"};
-static constexpr ble_uuid128_t serviceUuid{"23014ccc-4677-4864-b4c1-8f772b373fac"_uuid128};
-static constexpr ble_uuid128_t characteristicUuid{"37107598-7030-46d3-b688-e3664c1712f0"_uuid128};
+static ZZ::Util::TextBuffer<64> l_deviceName{};
+static constexpr ble_uuid128_t serviceUuid{CONFIG_ZZ_BLE_COM_SVC_UUID ""_uuid128};
+static constexpr ble_uuid128_t characteristicUuid{CONFIG_ZZ_BLE_COM_CHR_UUID ""_uuid128};
 static constexpr esp_power_level_t defaultPowerLevel{ESP_PWR_LVL_P9};
 
 /* Range: 0x001B-0x00FB */
@@ -97,8 +99,8 @@ static auto advertise() -> void {
     fields.tx_pwr_lvl_is_present = 1;
     fields.tx_pwr_lvl = defaultPowerLevel;
 
-    fields.name = reinterpret_cast<const uint8_t *>(deviceName.data());
-    fields.name_len = deviceName.length();
+    fields.name = reinterpret_cast<const uint8_t *>(l_deviceName.ptr());
+    fields.name_len = l_deviceName.len();
     fields.name_is_complete = 1;
 
     static constexpr ble_uuid16_t alertUuid{"1811"_uuid16};
@@ -160,7 +162,9 @@ const std::array services{
     ble_gatt_svc_def{},
 };
 
-auto init(CommandCallback onCommand) -> void {
+auto init(const std::string_view &deviceName,
+          CommandCallback onCommand) -> void {
+    l_deviceName = decltype(l_deviceName)(deviceName);
     clientCallback = onCommand;
 
     ESP_ERROR_CHECK(esp_nimble_hci_and_controller_init());

@@ -95,7 +95,7 @@ static auto advertise() -> void {
                    BLE_HS_ADV_F_BREDR_UNSUP;
 
     fields.tx_pwr_lvl_is_present = 1;
-    fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
+    fields.tx_pwr_lvl = defaultPowerLevel;
 
     fields.name = reinterpret_cast<const uint8_t *>(deviceName.data());
     fields.name_len = deviceName.length();

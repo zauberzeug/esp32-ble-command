@@ -24,6 +24,12 @@ static constexpr ble_uuid128_t serviceUuid{"23014ccc-4677-4864-b4c1-8f772b373fac
 static constexpr ble_uuid128_t characteristicUuid{"37107598-7030-46d3-b688-e3664c1712f0"_uuid128};
 static constexpr esp_power_level_t defaultPowerLevel{ESP_PWR_LVL_P9};
 
+/* Range: 0x001B-0x00FB */
+static constexpr std::uint16_t txDataLength{0xFB};
+
+/* Range: 0x0148-0x0848 (stated max 0x4290 leads to BLE_HS_ECONTROLLER) */
+static constexpr std::uint16_t txDataTime{0x0848};
+
 static const char TAG[]{"LizardBle"};
 
 using namespace ZZ;
@@ -44,8 +50,12 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
 
         if (event->connect.status == 0) {
             /* Max packet length, min transmission time */
-            ble_gap_set_data_len(event->connect.conn_handle,
-                                 0xFB, 0x0148);
+            ESP_LOGI(TAG, "set_data_len(%X, %X)", txDataLength, txDataTime);
+            int rc = ble_gap_set_data_len(event->connect.conn_handle,
+                                          txDataLength, txDataTime);
+            if (rc != 0) {
+                ESP_LOGW(TAG, "set_data_len failed; rc=0x%X", rc);
+            }
         }
 
         if (event->connect.status != 0) {

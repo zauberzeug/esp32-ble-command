@@ -1,4 +1,4 @@
-#include "esp32-lizard-ble.h"
+#include "esp32-ble-command.h"
 
 #include <cassert>
 
@@ -30,7 +30,7 @@ static constexpr std::uint16_t txDataLength{0xFB};
 /* Range: 0x0148-0x0848 (stated max 0x4290 leads to BLE_HS_ECONTROLLER) */
 static constexpr std::uint16_t txDataTime{0x0848};
 
-static const char TAG[]{"LizardBle"};
+static const char TAG[]{"BleCom"};
 
 using namespace ZZ;
 using namespace FrtosUtil;

@@ -1,7 +1,7 @@
 idf_component_register(
 SRCS
-    "include/esp32-lizard-ble.h"
-    "esp32-lizard-ble.cpp"
+    "include/esp32-ble-command.h"
+    "esp32-ble-command.cpp"
 INCLUDE_DIRS
     "include"
 REQUIRES

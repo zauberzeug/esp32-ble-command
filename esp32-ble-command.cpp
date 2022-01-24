@@ -99,8 +99,8 @@ static auto advertise() -> void {
     fields.tx_pwr_lvl_is_present = 1;
     fields.tx_pwr_lvl = defaultPowerLevel;
 
-    fields.name = reinterpret_cast<const uint8_t *>(l_deviceName.ptr());
-    fields.name_len = l_deviceName.len();
+    fields.name = reinterpret_cast<const uint8_t *>(l_deviceName.data());
+    fields.name_len = l_deviceName.length();
     fields.name_is_complete = 1;
 
     static constexpr ble_uuid16_t alertUuid{"1811"_uuid16};

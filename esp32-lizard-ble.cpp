@@ -205,13 +205,6 @@ auto init(CommandCallback onCommand) -> void {
     rc = ble_gatts_add_svcs(services.data());
     assert(rc == 0);
 
-    rc = ble_svc_gap_device_name_set("RobotBrain/Lizard");
-    assert(rc == 0);
-
-    /* Set appearance to rice cooker */
-    rc = ble_svc_gap_device_appearance_set(0x090E);
-    assert(rc == 0);
-
     esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, defaultPowerLevel);
 
     hostTask.run();

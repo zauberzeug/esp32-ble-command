@@ -19,9 +19,9 @@
 
 #include "sdkconfig.h"
 
-namespace LizardBle {
+namespace ZZ::BleCommand {
 
-static ZZ::Util::TextBuffer<64> l_deviceName{};
+static Util::TextBuffer<64> l_deviceName{};
 static constexpr ble_uuid128_t serviceUuid{CONFIG_ZZ_BLE_COM_SVC_UUID ""_uuid128};
 static constexpr ble_uuid128_t characteristicUuid{CONFIG_ZZ_BLE_COM_CHR_UUID ""_uuid128};
 static constexpr esp_power_level_t defaultPowerLevel{ESP_PWR_LVL_P9};
@@ -34,7 +34,6 @@ static constexpr std::uint16_t txDataTime{0x0848};
 
 static const char TAG[]{"BleCom"};
 
-using namespace ZZ;
 using namespace FrtosUtil;
 
 static uint8_t ownAddrType;
@@ -141,10 +140,10 @@ Task<NIMBLE_STACK_SIZE> hostTask{
     },
 };
 
-static const ZZ::Ble::Gatts::Service lizardComService{
+static const Ble::Gatts::Service lizardComService{
     serviceUuid,
     {
-        ZZ::Ble::Gatts::Characteristic{
+        Ble::Gatts::Characteristic{
             characteristicUuid,
             BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
             [](std::uint16_t, std::uint16_t, ble_gatt_access_ctxt *ctx) -> int {
@@ -218,4 +217,4 @@ auto fini() -> void {
     nimble_port_stop();
 }
 
-} // namespace LizardBle
+} // namespace ZZ::BleCommand

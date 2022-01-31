@@ -40,6 +40,7 @@ using namespace FrtosUtil;
 
 static uint8_t ownAddrType;
 static CommandCallback clientCallback;
+static bool running{false};
 
 static auto advertise() -> void;
 
@@ -92,6 +93,10 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
 }
 
 static auto advertise() -> void {
+    if (!running) {
+        return;
+    }
+
     ble_hs_adv_fields fields{};
 
     fields.flags = BLE_HS_ADV_F_DISC_GEN |
@@ -176,6 +181,7 @@ auto init(const std::string_view &deviceName,
           CommandCallback onCommand) -> void {
     l_deviceName = decltype(l_deviceName)(deviceName);
     clientCallback = onCommand;
+    running = true;
 
     ESP_ERROR_CHECK(esp_nimble_hci_and_controller_init());
 
@@ -229,7 +235,10 @@ auto init(const std::string_view &deviceName,
 }
 
 auto fini() -> void {
+    running = false;
+
     nimble_port_stop();
+    ESP_ERROR_CHECK(esp_nimble_hci_and_controller_deinit());
 }
 
 } // namespace ZZ::BleCommand

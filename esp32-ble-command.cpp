@@ -21,7 +21,9 @@
 
 namespace ZZ::BleCommand {
 
-static Util::TextBuffer<64> l_deviceName{};
+/* This buffer will be used for advertising, so keep the device name
+ * truncated to 29 bytes here */
+static Util::TextBuffer<29 + 1> l_deviceName{};
 static constexpr ble_uuid128_t serviceUuid{CONFIG_ZZ_BLE_COM_SVC_UUID ""_uuid128};
 static constexpr ble_uuid128_t characteristicUuid{CONFIG_ZZ_BLE_COM_CHR_UUID ""_uuid128};
 static constexpr esp_power_level_t defaultPowerLevel{ESP_PWR_LVL_P9};
@@ -98,10 +100,6 @@ static auto advertise() -> void {
     fields.tx_pwr_lvl_is_present = 1;
     fields.tx_pwr_lvl = defaultPowerLevel;
 
-    fields.name = reinterpret_cast<const uint8_t *>(l_deviceName.data());
-    fields.name_len = l_deviceName.length();
-    fields.name_is_complete = 1;
-
     static constexpr ble_uuid16_t alertUuid{"1811"_uuid16};
     fields.uuids16 = &alertUuid;
     fields.num_uuids16 = 1;
@@ -112,6 +110,19 @@ static auto advertise() -> void {
 
     if (rc != 0) {
         ESP_LOGE(TAG, "error setting advertisement data; rc=%d", rc);
+        return;
+    }
+
+    /* Use up the entire scan response payload for the device name */
+    ble_hs_adv_fields scanFields{};
+    scanFields.name = reinterpret_cast<const uint8_t *>(l_deviceName.data());
+    scanFields.name_len = l_deviceName.length();
+    scanFields.name_is_complete = 1;
+
+    rc = ble_gap_adv_rsp_set_fields(&scanFields);
+
+    if (rc != 0) {
+        ESP_LOGE(TAG, "error setting scan response data; rc=%d", rc);
         return;
     }
 
@@ -209,6 +220,10 @@ auto init(const std::string_view &deviceName,
     assert(rc == 0);
 
     esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, defaultPowerLevel);
+
+    /* This device name will be exposed as an attribute as part of GAP,
+     * but not within advertisement packets */
+    ble_svc_gap_device_name_set(deviceName.data());
 
     hostTask.run();
 }

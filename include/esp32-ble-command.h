@@ -1,5 +1,11 @@
-#ifndef ZZBLECOMMAND_H
-#define ZZBLECOMMAND_H
+/*
+ * SPDX-FileCopyrightText: 2022 Zauberzeug GmbH
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#ifndef ZZ_BLE_COMMAND_H
+#define ZZ_BLE_COMMAND_H
 
 #include <functional>
 #include <string_view>
@@ -16,4 +22,4 @@ auto init(const std::string_view &deviceName,
 auto fini() -> void;
 } // namespace ZZ::BleCommand
 
-#endif // ZZBLECOMMAND_H
+#endif // ZZ_BLE_COMMAND_H

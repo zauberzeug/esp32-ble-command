@@ -1,3 +1,9 @@
+/*
+ * SPDX-FileCopyrightText: 2022 Zauberzeug GmbH
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "esp32-ble-command.h"
 
 #include <cassert>

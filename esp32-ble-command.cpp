@@ -44,9 +44,9 @@ static const char TAG[]{"BleCom"};
 
 using namespace FrtosUtil;
 
-static uint8_t ownAddrType;
-static CommandCallback clientCallback;
-static bool running{false};
+static uint8_t l_ownAddrType;
+static CommandCallback l_clientCallback;
+static bool l_running{false};
 
 static auto advertise() -> void;
 
@@ -99,7 +99,7 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
 }
 
 static auto advertise() -> void {
-    if (!running) {
+    if (!l_running) {
         return;
     }
 
@@ -141,7 +141,7 @@ static auto advertise() -> void {
     ble_gap_adv_params advParams{};
     advParams.conn_mode = BLE_GAP_CONN_MODE_UND;
     advParams.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    rc = ble_gap_adv_start(ownAddrType, NULL, BLE_HS_FOREVER,
+    rc = ble_gap_adv_start(l_ownAddrType, NULL, BLE_HS_FOREVER,
                            &advParams, onGapEvent, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "error enabling advertisement; rc=%d", rc);
@@ -170,7 +170,7 @@ static const Ble::Gatts::Service lizardComService{
             BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
             [](std::uint16_t, std::uint16_t, ble_gatt_access_ctxt *ctx) -> int {
                 const std::string_view command{reinterpret_cast<char *>(ctx->om->om_data), ctx->om->om_len};
-                clientCallback(command);
+                l_clientCallback(command);
 
                 return 0;
             },
@@ -186,8 +186,8 @@ const std::array services{
 auto init(const std::string_view &deviceName,
           CommandCallback onCommand) -> void {
     l_deviceName = decltype(l_deviceName)(deviceName);
-    clientCallback = onCommand;
-    running = true;
+    l_clientCallback = onCommand;
+    l_running = true;
 
     ESP_ERROR_CHECK(esp_nimble_hci_and_controller_init());
 
@@ -206,7 +206,7 @@ auto init(const std::string_view &deviceName,
         assert(rc == 0);
 
         /* Figure out address to use while advertising (no privacy for now) */
-        rc = ble_hs_id_infer_auto(0, &ownAddrType);
+        rc = ble_hs_id_infer_auto(0, &l_ownAddrType);
         if (rc != 0) {
             ESP_LOGE(TAG, "error determining address type; rc=%d", rc);
             return;
@@ -241,7 +241,7 @@ auto init(const std::string_view &deviceName,
 }
 
 auto fini() -> void {
-    running = false;
+    l_running = false;
 
     nimble_port_stop();
     ESP_ERROR_CHECK(esp_nimble_hci_and_controller_deinit());

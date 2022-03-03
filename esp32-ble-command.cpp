@@ -18,10 +18,10 @@
 #include <services/gap/ble_svc_gap.h>
 #include <services/gatt/ble_svc_gatt.h>
 
-#include <zauber/ble/gatts.h>
-#include <zauber/ble/uuid.h>
-#include <zauber/frtos-util.h>
-#include <zauber/util.h>
+#include <esp_zeug/ble/gatts.h>
+#include <esp_zeug/ble/uuid.h>
+#include <esp_zeug/frtos-util.h>
+#include <esp_zeug/util.h>
 
 #include "sdkconfig.h"
 

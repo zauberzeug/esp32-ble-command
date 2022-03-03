@@ -8,6 +8,6 @@ REQUIRES
 
 PRIV_REQUIRES
     bt
-    esp32-zauber
+    esp32-zeug
 )
 component_compile_options(-std=gnu++17 -Wsuggest-override)

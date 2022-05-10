@@ -1,4 +1,4 @@
-menu "Zauber BLE command module"
+menu "Zeug BLE command module"
 
 config ZZ_BLE_COM_SVC_UUID
     string

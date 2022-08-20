@@ -241,10 +241,10 @@ auto init(const std::string_view &deviceName,
 }
 
 auto fini() -> void {
+    if (nimble_port_stop() == 0) {
+        ESP_ERROR_CHECK(esp_nimble_hci_and_controller_deinit());
+    }
     l_running = false;
-
-    nimble_port_stop();
-    ESP_ERROR_CHECK(esp_nimble_hci_and_controller_deinit());
 }
 
 } // namespace ZZ::BleCommand

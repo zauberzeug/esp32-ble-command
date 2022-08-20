@@ -32,6 +32,7 @@ namespace ZZ::BleCommand {
 static Util::TextBuffer<29 + 1> l_deviceName{};
 static constexpr ble_uuid128_t serviceUuid{CONFIG_ZZ_BLE_COM_SVC_UUID ""_uuid128};
 static constexpr ble_uuid128_t characteristicUuid{CONFIG_ZZ_BLE_COM_CHR_UUID ""_uuid128};
+static constexpr ble_uuid128_t notifyCharaUuid{CONFIG_ZZ_BLE_COM_SEND_CHR_UUID ""_uuid128};
 static constexpr esp_power_level_t defaultPowerLevel{ESP_PWR_LVL_P9};
 
 /* Range: 0x001B-0x00FB */
@@ -47,6 +48,9 @@ using namespace FrtosUtil;
 static uint8_t l_ownAddrType;
 static CommandCallback l_clientCallback;
 static bool l_running{false};
+
+static std::uint16_t l_notifyCharaValueHandle;
+static std::uint16_t l_currentCon{BLE_HS_CONN_HANDLE_NONE};
 
 static auto advertise() -> void;
 
@@ -66,6 +70,8 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
             if (rc != 0) {
                 ESP_LOGW(TAG, "set_data_len failed; rc=0x%X", rc);
             }
+
+            l_currentCon = event->connect.conn_handle;
         }
 
         if (event->connect.status != 0) {
@@ -76,6 +82,10 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGV(TAG, "disconnect; reason=%d", event->disconnect.reason);
+
+        if (event->disconnect.conn.conn_handle == l_currentCon) {
+            l_currentCon = BLE_HS_CONN_HANDLE_NONE;
+        }
 
         /* Connection terminated; resume advertising. */
         advertise();
@@ -175,6 +185,15 @@ static const Ble::Gatts::Service lizardComService{
                 return 0;
             },
         },
+        Ble::Gatts::Characteristic{
+            notifyCharaUuid,
+            BLE_GATT_CHR_F_NOTIFY,
+            &l_notifyCharaValueHandle,
+            [](std::uint16_t, std::uint16_t, ble_gatt_access_ctxt *ctx) -> int {
+                /* not to be read directly, only accessible via notifications */
+                return 0;
+            },
+        },
     },
 };
 
@@ -238,6 +257,19 @@ auto init(const std::string_view &deviceName,
     ble_svc_gap_device_name_set(deviceName.data());
 
     hostTask.run();
+}
+
+auto send(const std::string_view &data) -> int {
+    if (l_currentCon == BLE_HS_CONN_HANDLE_NONE) {
+        return BLE_HS_ENOTCONN;
+    }
+
+    os_mbuf *om{ble_hs_mbuf_from_flat(data.data(), data.length())};
+    if (om == nullptr) {
+        return BLE_HS_ENOMEM;
+    }
+
+    return ble_gattc_notify_custom(l_currentCon, l_notifyCharaValueHandle, om);
 }
 
 auto fini() -> void {

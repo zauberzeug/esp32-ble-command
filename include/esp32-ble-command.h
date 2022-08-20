@@ -19,6 +19,9 @@ using CommandCallback = std::function<void(const std::string_view &)>;
  * The GAP attribute is unaffected by this limitation. */
 auto init(const std::string_view &deviceName,
           CommandCallback onCommand) -> void;
+/* Sends data to the first connected device via notification.
+ * Returns 0 on success, NimBLE error code otherwise. */
+auto send(const std::string_view &data) -> int;
 auto fini() -> void;
 } // namespace ZZ::BleCommand
 

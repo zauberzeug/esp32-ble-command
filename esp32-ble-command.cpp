@@ -273,6 +273,9 @@ auto send(const std::string_view &data) -> int {
 }
 
 auto fini() -> void {
+    if (!l_running) {
+        return;
+    }
     if (nimble_port_stop() == 0) {
         ESP_ERROR_CHECK(esp_nimble_hci_and_controller_deinit());
     }

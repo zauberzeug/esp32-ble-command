@@ -159,7 +159,7 @@ static auto advertise() -> void {
     }
 }
 
-Task<NIMBLE_STACK_SIZE> hostTask{
+Task<NIMBLE_HS_STACK_SIZE> hostTask{
     "ble_host",
     Core::PRO,
     []() {
@@ -207,8 +207,6 @@ auto init(const std::string_view &deviceName,
     l_deviceName = decltype(l_deviceName)(deviceName);
     l_clientCallback = onCommand;
     l_running = true;
-
-    ESP_ERROR_CHECK(esp_nimble_hci_and_controller_init());
 
     nimble_port_init();
 
@@ -273,11 +271,12 @@ auto send(const std::string_view &data) -> int {
 }
 
 auto fini() -> void {
+
     if (!l_running) {
         return;
     }
     if (nimble_port_stop() == 0) {
-        ESP_ERROR_CHECK(esp_nimble_hci_and_controller_deinit());
+        ESP_ERROR_CHECK(nimble_port_deinit());
     }
     l_running = false;
 }

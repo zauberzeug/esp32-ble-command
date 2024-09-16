@@ -11,6 +11,10 @@
 #include <esp_bt.h>
 #include <esp_log.h>
 #include <esp_nimble_hci.h>
+#ifdef min
+#undef min // esp-idf/components/bt/host/nimble/nimble/porting/nimble/include/os/os.h:38:19
+#endif
+
 #include <host/ble_hs.h>
 #include <host/util/util.h>
 #include <nimble/nimble_port.h>

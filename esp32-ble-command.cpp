@@ -7,6 +7,7 @@
 #include "esp32-ble-command.h"
 
 #include <cassert>
+#include <cinttypes>
 
 #include <esp_bt.h>
 #include <esp_log.h>
@@ -51,7 +52,11 @@ using namespace FrtosUtil;
 
 static uint8_t l_ownAddrType;
 static CommandCallback l_clientCallback;
+static PasskeyCallback l_passkeyCallback;
+static AuthCompleteCallback l_authCompleteCallback;
 static bool l_running{false};
+static bool l_securityEnabled{false};
+static std::uint32_t l_passkey{123456}; // Default passkey
 
 static std::uint16_t l_notifyCharaValueHandle;
 static std::uint16_t l_currentCon{BLE_HS_CONN_HANDLE_NONE};
@@ -76,6 +81,14 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
             }
 
             l_currentCon = event->connect.conn_handle;
+
+            /* If security is enabled, initiate security/pairing */
+            if (l_securityEnabled) {
+                rc = ble_gap_security_initiate(event->connect.conn_handle);
+                if (rc != 0) {
+                    ESP_LOGW(TAG, "Failed to initiate security; rc=0x%X", rc);
+                }
+            }
         }
 
         if (event->connect.status != 0) {
@@ -106,6 +119,34 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
                  event->mtu.conn_handle,
                  event->mtu.channel_id,
                  event->mtu.value);
+        return 0;
+
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+        ESP_LOGI(TAG, "PASSKEY_ACTION_EVENT started");
+        if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
+            ESP_LOGI(TAG, "Enter passkey %" PRIu32 " on the peer device", l_passkey);
+
+            if (l_passkeyCallback) {
+                l_passkeyCallback(l_passkey);
+            }
+
+            struct ble_sm_io pkey = {0};
+            pkey.action = event->passkey.params.action;
+            pkey.passkey = l_passkey;
+
+            int rc = ble_sm_inject_io(event->passkey.conn_handle, &pkey);
+            ESP_LOGI(TAG, "ble_sm_inject_io result: %d", rc);
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        ESP_LOGI(TAG, "encryption change event; status=%d",
+                 event->enc_change.status);
+
+        if (l_authCompleteCallback) {
+            l_authCompleteCallback(event->enc_change.status == 0,
+                                   event->enc_change.conn_handle);
+        }
         return 0;
     }
 
@@ -206,11 +247,22 @@ const std::array services{
     ble_gatt_svc_def{},
 };
 
+static auto configureSecurityManager() -> void {
+    /* Set security requirements */
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
+    ble_hs_cfg.sm_bonding = 1;
+    ble_hs_cfg.sm_mitm = 1;
+    ble_hs_cfg.sm_sc = 1; // Enable secure connections
+    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+}
+
 auto init(const std::string_view &deviceName,
           CommandCallback onCommand) -> void {
     l_deviceName = decltype(l_deviceName)(deviceName);
     l_clientCallback = onCommand;
     l_running = true;
+    l_securityEnabled = false;
 
     nimble_port_init();
 
@@ -240,6 +292,72 @@ auto init(const std::string_view &deviceName,
     ble_hs_cfg.gatts_register_cb = nullptr;
     ble_hs_cfg.store_status_cb = nullptr;
     ble_hs_cfg.sm_sc = 0;
+
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+
+    int rc;
+
+    rc = ble_gatts_count_cfg(services.data());
+    assert(rc == 0);
+
+    rc = ble_gatts_add_svcs(services.data());
+    assert(rc == 0);
+
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, defaultPowerLevel);
+
+    /* This device name will be exposed as an attribute as part of GAP,
+     * but not within advertisement packets */
+    ble_svc_gap_device_name_set(deviceName.data());
+
+    hostTask.run();
+}
+
+auto init(const std::string_view &deviceName,
+          CommandCallback onCommand,
+          std::uint32_t passkey,
+          PasskeyCallback onPasskeyDisplay,
+          AuthCompleteCallback onAuthComplete) -> void {
+    l_deviceName = decltype(l_deviceName)(deviceName);
+    l_clientCallback = onCommand;
+    l_passkeyCallback = onPasskeyDisplay;
+    l_authCompleteCallback = onAuthComplete;
+    l_running = true;
+    l_securityEnabled = true;
+    l_passkey = passkey;
+
+    ESP_LOGI(TAG, "Initializing BLE with passkey security (passkey: %06" PRIu32 ")", l_passkey);
+
+    nimble_port_init();
+
+    /* Initialize the NimBLE host configuration. */
+
+    ble_hs_cfg.reset_cb = [](int reason) {
+        ESP_LOGV(TAG, "Resetting state; reason=%d", reason);
+    };
+
+    ble_hs_cfg.sync_cb = []() {
+        int rc;
+
+        rc = ble_hs_util_ensure_addr(0);
+        assert(rc == 0);
+
+        /* Figure out address to use while advertising (no privacy for now) */
+        rc = ble_hs_id_infer_auto(0, &l_ownAddrType);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "error determining address type; rc=%d", rc);
+            return;
+        }
+
+        /* Begin advertising. */
+        advertise();
+    };
+
+    ble_hs_cfg.gatts_register_cb = nullptr;
+    ble_hs_cfg.store_status_cb = nullptr;
+
+    /* Configure security manager for passkey authentication */
+    configureSecurityManager();
 
     ble_svc_gap_init();
     ble_svc_gatt_init();

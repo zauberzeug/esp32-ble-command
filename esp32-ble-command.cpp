@@ -7,11 +7,11 @@
 #include "esp32-ble-command.h"
 
 #include <cassert>
-#include <cinttypes>
 
 #include <esp_bt.h>
 #include <esp_log.h>
 #include <esp_nimble_hci.h>
+#include <nvs_flash.h>
 #ifdef min
 #undef min // esp-idf/components/bt/host/nimble/nimble/porting/nimble/include/os/os.h:38:19
 #endif
@@ -23,22 +23,43 @@
 #include <services/gap/ble_svc_gap.h>
 #include <services/gatt/ble_svc_gatt.h>
 
+#include <esp_system.h>
 #include <esp_zeug/ble/gatts.h>
 #include <esp_zeug/ble/uuid.h>
 #include <esp_zeug/frtos-util.h>
 #include <esp_zeug/util.h>
+#include <host/ble_store.h>
 
 #include "sdkconfig.h"
 
 namespace ZZ::BleCommand {
 
+// Helper: build UUIDs from strings without relying on user-defined literals
+constexpr ble_uuid128_t uuid128_from_str(const char *str) {
+    ble_uuid128_t result{BLE_UUID_TYPE_128, {0}};
+    ZZ::Ble::Uuid::parse(std::string_view{str}, result.value, 16);
+    return result;
+}
+
+constexpr ble_uuid16_t uuid16_from_str(const char *str) {
+    ble_uuid16_t result{BLE_UUID_TYPE_16, 0};
+    std::uint8_t buf[2]{};
+    ZZ::Ble::Uuid::parse(std::string_view{str}, buf, 2);
+    result.value = static_cast<uint16_t>(buf[1] << 8 | buf[0]);
+    return result;
+}
+
 /* This buffer will be used for advertising, so keep the device name
  * truncated to 29 bytes here */
 static Util::TextBuffer<29 + 1> l_deviceName{};
-static constexpr ble_uuid128_t serviceUuid{CONFIG_ZZ_BLE_COM_SVC_UUID ""_uuid128};
-static constexpr ble_uuid128_t characteristicUuid{CONFIG_ZZ_BLE_COM_CHR_UUID ""_uuid128};
-static constexpr ble_uuid128_t notifyCharaUuid{CONFIG_ZZ_BLE_COM_SEND_CHR_UUID ""_uuid128};
+static constexpr ble_uuid128_t serviceUuid = uuid128_from_str(CONFIG_ZZ_BLE_COM_SVC_UUID);
+static constexpr ble_uuid128_t characteristicUuid = uuid128_from_str(CONFIG_ZZ_BLE_COM_CHR_UUID);
+static constexpr ble_uuid128_t notifyCharaUuid = uuid128_from_str(CONFIG_ZZ_BLE_COM_SEND_CHR_UUID);
 static constexpr esp_power_level_t defaultPowerLevel{ESP_PWR_LVL_P9};
+
+/* PIN authentication constants */
+static constexpr std::uint32_t masterPin{999999}; // Master key for developers
+static constexpr std::uint32_t userPin{123456};   // User key (will be configurable via NVS later)
 
 /* Range: 0x001B-0x00FB */
 static constexpr std::uint16_t txDataLength{0xFB};
@@ -50,30 +71,51 @@ static const char TAG[]{"BleCom"};
 
 using namespace FrtosUtil;
 
+#ifndef ZZ_BLE_DEBUG
+#define ZZ_BLE_DEBUG 0
+#endif
+
+#if ZZ_BLE_DEBUG
+#define BLE_LOGV(TAG_, FMT_, ...) ESP_LOGV(TAG_, FMT_, ##__VA_ARGS__)
+#define BLE_LOGD(TAG_, FMT_, ...) ESP_LOGD(TAG_, FMT_, ##__VA_ARGS__)
+#define BLE_LOGI(TAG_, FMT_, ...) ESP_LOGI(TAG_, FMT_, ##__VA_ARGS__)
+#define BLE_LOGW(TAG_, FMT_, ...) ESP_LOGW(TAG_, FMT_, ##__VA_ARGS__)
+#else
+#define BLE_LOGV(TAG_, FMT_, ...) \
+    do {                          \
+    } while (0)
+#define BLE_LOGD(TAG_, FMT_, ...) \
+    do {                          \
+    } while (0)
+#define BLE_LOGI(TAG_, FMT_, ...) \
+    do {                          \
+    } while (0)
+#define BLE_LOGW(TAG_, FMT_, ...) \
+    do {                          \
+    } while (0)
+#endif
+
 static uint8_t l_ownAddrType;
 static CommandCallback l_clientCallback;
-static PasskeyCallback l_passkeyCallback;
-static AuthCompleteCallback l_authCompleteCallback;
 static bool l_running{false};
-static bool l_securityEnabled{false};
-static std::uint32_t l_passkey{123456}; // Default passkey
 
 static std::uint16_t l_notifyCharaValueHandle;
 static std::uint16_t l_currentCon{BLE_HS_CONN_HANDLE_NONE};
 
 static auto advertise() -> void;
+static auto onSecurityEvent(struct ble_gap_event *event, void *) -> int;
 
 static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         /* A new connection was established or a connection attempt failed. */
-        ESP_LOGV(TAG, "connection %s; status=%d",
+        BLE_LOGV(TAG, "connection %s; status=%d",
                  event->connect.status == 0 ? "established" : "failed",
                  event->connect.status);
 
         if (event->connect.status == 0) {
             /* Max packet length, min transmission time */
-            ESP_LOGI(TAG, "set_data_len(%X, %X)", txDataLength, txDataTime);
+            BLE_LOGI(TAG, "set_data_len(%X, %X)", txDataLength, txDataTime);
             int rc = ble_gap_set_data_len(event->connect.conn_handle,
                                           txDataLength, txDataTime);
             if (rc != 0) {
@@ -81,24 +123,64 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
             }
 
             l_currentCon = event->connect.conn_handle;
-
-            /* If security is enabled, initiate security/pairing */
-            if (l_securityEnabled) {
-                rc = ble_gap_security_initiate(event->connect.conn_handle);
-                if (rc != 0) {
-                    ESP_LOGW(TAG, "Failed to initiate security; rc=0x%X", rc);
-                }
-            }
         }
 
         if (event->connect.status != 0) {
             /* Connection failed; resume advertising. */
             advertise();
+        } else {
+            /* Connection successful - enforce PIN authentication for all connections */
+            BLE_LOGI(TAG, "Connection established - enforcing mandatory PIN");
+
+            // Small delay to let connection stabilize
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+
+            // Always initiate security
+            int rc = ble_gap_security_initiate(event->connect.conn_handle);
+            if (rc != 0) {
+                ESP_LOGW(TAG, "Failed to initiate PIN security: %d", rc);
+                // Immediately disconnect if we cannot enforce security
+                ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                ESP_LOGW(TAG, "Connection terminated - security enforcement failed");
+            } else {
+                BLE_LOGI(TAG, "PIN authentication initiated");
+            }
         }
         return 0;
 
-    case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGV(TAG, "disconnect; reason=%d", event->disconnect.reason);
+    case BLE_GAP_EVENT_DISCONNECT: {
+        BLE_LOGI(TAG, "Device disconnected: reason=%d handle=%d", event->disconnect.reason, event->disconnect.conn.conn_handle);
+
+        // Common disconnect reasons:
+        // 0x08 = Connection timeout
+        // 0x13 = Remote user terminated connection
+        // 0x16 = Connection terminated by local host
+        // 0x3D = Connection failed due to authentication failure
+        const char *reason_str = "";
+        switch (event->disconnect.reason) {
+        case 0x08:
+            reason_str = " (Connection timeout)";
+            break;
+        case 0x13:
+            reason_str = " (Remote user terminated)";
+            break;
+        case 0x16:
+            reason_str = " (Local host terminated)";
+            break;
+        case 0x3D:
+            reason_str = " (Authentication failure)";
+            break;
+        case 517:
+            reason_str = " (NimBLE: Connection timeout during pairing)";
+            break;
+        case 531:
+            reason_str = " (WRONG PIN - Security authentication failed)";
+            break;
+        default:
+            reason_str = " (Unknown reason)";
+            break;
+        }
+        BLE_LOGI(TAG, "Reason: %d%s", event->disconnect.reason, reason_str);
 
         if (event->disconnect.conn.conn_handle == l_currentCon) {
             l_currentCon = BLE_HS_CONN_HANDLE_NONE;
@@ -107,46 +189,47 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
         /* Connection terminated; resume advertising. */
         advertise();
         return 0;
+    }
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
-        ESP_LOGV(TAG, "advertise complete; reason=%d",
+        BLE_LOGV(TAG, "advertise complete; reason=%d",
                  event->adv_complete.reason);
         advertise();
         return 0;
 
     case BLE_GAP_EVENT_MTU:
-        ESP_LOGV(TAG, "mtu update event; conn_handle=%d cid=%d mtu=%d",
+        BLE_LOGV(TAG, "mtu update event; conn_handle=%d cid=%d mtu=%d",
                  event->mtu.conn_handle,
                  event->mtu.channel_id,
                  event->mtu.value);
         return 0;
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
-        ESP_LOGI(TAG, "PASSKEY_ACTION_EVENT started");
-        if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
-            ESP_LOGI(TAG, "Enter passkey %" PRIu32 " on the peer device", l_passkey);
-
-            if (l_passkeyCallback) {
-                l_passkeyCallback(l_passkey);
-            }
-
-            struct ble_sm_io pkey = {0};
-            pkey.action = event->passkey.params.action;
-            pkey.passkey = l_passkey;
-
-            int rc = ble_sm_inject_io(event->passkey.conn_handle, &pkey);
-            ESP_LOGI(TAG, "ble_sm_inject_io result: %d", rc);
-        }
-        return 0;
+        BLE_LOGI(TAG, "Security event: passkey action requested");
+        return onSecurityEvent(event, nullptr);
 
     case BLE_GAP_EVENT_ENC_CHANGE:
-        ESP_LOGI(TAG, "encryption change event; status=%d",
-                 event->enc_change.status);
+        BLE_LOGI(TAG, "Security event: encryption/authentication result");
+        return onSecurityEvent(event, nullptr);
 
-        if (l_authCompleteCallback) {
-            l_authCompleteCallback(event->enc_change.status == 0,
-                                   event->enc_change.conn_handle);
-        }
+    case BLE_GAP_EVENT_IDENTITY_RESOLVED:
+        BLE_LOGI(TAG, "Security event: previously bonded device connecting");
+        return onSecurityEvent(event, nullptr);
+
+    case BLE_GAP_EVENT_REPEAT_PAIRING:
+        BLE_LOGI(TAG, "Security event: repeat pairing attempt");
+        return 0;
+
+    case BLE_GAP_EVENT_CONN_UPDATE_REQ:
+        BLE_LOGI(TAG, "Connection update requested");
+        return 0;
+
+    case BLE_GAP_EVENT_L2CAP_UPDATE_REQ:
+        BLE_LOGI(TAG, "L2CAP update requested");
+        return 0;
+
+    default:
+        BLE_LOGD(TAG, "Unhandled GAP event: %d", event->type);
         return 0;
     }
 
@@ -166,7 +249,7 @@ static auto advertise() -> void {
     fields.tx_pwr_lvl_is_present = 1;
     fields.tx_pwr_lvl = defaultPowerLevel;
 
-    static constexpr ble_uuid16_t alertUuid{"1811"_uuid16};
+    static constexpr ble_uuid16_t alertUuid = uuid16_from_str("1811");
     fields.uuids16 = &alertUuid;
     fields.num_uuids16 = 1;
     fields.uuids16_is_complete = 1;
@@ -204,6 +287,58 @@ static auto advertise() -> void {
     }
 }
 
+static auto onSecurityEvent(struct ble_gap_event *event, void *) -> int {
+    switch (event->type) {
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+        BLE_LOGI(TAG, "Passkey action: %d", event->passkey.params.action);
+        BLE_LOGI(TAG, "Connection handle: %d", event->passkey.conn_handle);
+
+        if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
+            // Use a fixed 6-digit passkey for now
+            constexpr uint32_t code = 123456u;
+            ESP_LOGI(TAG, "BLE PIN: %06lu", static_cast<unsigned long>(code));
+
+            struct ble_sm_io pkey = {};
+            pkey.action = event->passkey.params.action;
+            pkey.passkey = code;
+            ble_sm_inject_io(event->passkey.conn_handle, &pkey);
+
+        } else if (event->passkey.params.action == BLE_SM_IOACT_INPUT) {
+            // We are display-only; ignore INPUT requests
+            BLE_LOGW(TAG, "Peer requested INPUT, but device is display-only; ignoring");
+
+        } else if (event->passkey.params.action == BLE_SM_IOACT_NUMCMP) {
+            BLE_LOGI(TAG, "Numeric comparison: %06lu", static_cast<unsigned long>(event->passkey.params.numcmp));
+            struct ble_sm_io pkey = {};
+            pkey.action = event->passkey.params.action;
+            pkey.numcmp_accept = 1;
+            ble_sm_inject_io(event->passkey.conn_handle, &pkey);
+        }
+        BLE_LOGI(TAG, "Passkey handling complete");
+        return 0;
+
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        if (event->enc_change.status == 0) {
+            BLE_LOGI(TAG, "PIN authentication successful; connection encrypted");
+        } else {
+            ESP_LOGW(TAG, "Security failed: %d", event->enc_change.status);
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_IDENTITY_RESOLVED:
+        BLE_LOGI(TAG, "Recognized bonded device - auto-connecting securely");
+        return 0;
+
+    default:
+        BLE_LOGD(TAG, "Other security event: %d", event->type);
+        return 0;
+    }
+
+    return 0;
+}
+
+extern "C" void ble_store_config_init(void);
+
 Task<NIMBLE_HS_STACK_SIZE> hostTask{
     "ble_host",
     Core::PRO,
@@ -223,7 +358,27 @@ static const Ble::Gatts::Service lizardComService{
         Ble::Gatts::Characteristic{
             characteristicUuid,
             BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
-            [](std::uint16_t, std::uint16_t, ble_gatt_access_ctxt *ctx) -> int {
+            [](std::uint16_t conn_handle, std::uint16_t attr_handle, ble_gatt_access_ctxt *ctx) -> int {
+                // CRITICAL SECURITY CHECK: Verify connection is encrypted before processing commands
+                struct ble_gap_conn_desc desc;
+                int rc = ble_gap_conn_find(conn_handle, &desc);
+                if (rc != 0) {
+                    ESP_LOGE(TAG, "Invalid connection handle");
+                    return BLE_ATT_ERR_UNLIKELY;
+                }
+
+                if (!desc.sec_state.encrypted) {
+                    ESP_LOGE(TAG, "Unencrypted command attempt - connection not authenticated");
+                    return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+                }
+
+                if (!desc.sec_state.authenticated) {
+                    ESP_LOGE(TAG, "Unauthenticated command attempt - missing PIN authentication");
+                    return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+                }
+
+                BLE_LOGI(TAG, "Secure command: encrypted & authenticated connection verified");
+
                 const std::string_view command{reinterpret_cast<char *>(ctx->om->om_data), ctx->om->om_len};
                 l_clientCallback(command);
 
@@ -247,88 +402,23 @@ const std::array services{
     ble_gatt_svc_def{},
 };
 
-static auto configureSecurityManager() -> void {
-    /* Set security requirements */
-    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
-    ble_hs_cfg.sm_bonding = 1;
-    ble_hs_cfg.sm_mitm = 1;
-    ble_hs_cfg.sm_sc = 1; // Enable secure connections
-    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
-    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
-}
-
 auto init(const std::string_view &deviceName,
           CommandCallback onCommand) -> void {
     l_deviceName = decltype(l_deviceName)(deviceName);
     l_clientCallback = onCommand;
     l_running = true;
-    l_securityEnabled = false;
+
+    // Initialize NVS once at startup; do not erase bonds unconditionally
+    esp_err_t nvs_rc = nvs_flash_init();
+    if (nvs_rc == ESP_ERR_NVS_NO_FREE_PAGES || nvs_rc == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
+    }
 
     nimble_port_init();
 
-    /* Initialize the NimBLE host configuration. */
-
-    ble_hs_cfg.reset_cb = [](int reason) {
-        ESP_LOGV(TAG, "Resetting state; reason=%d", reason);
-    };
-
-    ble_hs_cfg.sync_cb = []() {
-        int rc;
-
-        rc = ble_hs_util_ensure_addr(0);
-        assert(rc == 0);
-
-        /* Figure out address to use while advertising (no privacy for now) */
-        rc = ble_hs_id_infer_auto(0, &l_ownAddrType);
-        if (rc != 0) {
-            ESP_LOGE(TAG, "error determining address type; rc=%d", rc);
-            return;
-        }
-
-        /* Begin advertising. */
-        advertise();
-    };
-
-    ble_hs_cfg.gatts_register_cb = nullptr;
-    ble_hs_cfg.store_status_cb = nullptr;
-    ble_hs_cfg.sm_sc = 0;
-
-    ble_svc_gap_init();
-    ble_svc_gatt_init();
-
-    int rc;
-
-    rc = ble_gatts_count_cfg(services.data());
-    assert(rc == 0);
-
-    rc = ble_gatts_add_svcs(services.data());
-    assert(rc == 0);
-
-    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, defaultPowerLevel);
-
-    /* This device name will be exposed as an attribute as part of GAP,
-     * but not within advertisement packets */
-    ble_svc_gap_device_name_set(deviceName.data());
-
-    hostTask.run();
-}
-
-auto init(const std::string_view &deviceName,
-          CommandCallback onCommand,
-          std::uint32_t passkey,
-          PasskeyCallback onPasskeyDisplay,
-          AuthCompleteCallback onAuthComplete) -> void {
-    l_deviceName = decltype(l_deviceName)(deviceName);
-    l_clientCallback = onCommand;
-    l_passkeyCallback = onPasskeyDisplay;
-    l_authCompleteCallback = onAuthComplete;
-    l_running = true;
-    l_securityEnabled = true;
-    l_passkey = passkey;
-
-    ESP_LOGI(TAG, "Initializing BLE with passkey security (passkey: %06" PRIu32 ")", l_passkey);
-
-    nimble_port_init();
+    // Initialize persistent storage for NimBLE (required for bonding)
+    ble_store_config_init();
 
     /* Initialize the NimBLE host configuration. */
 
@@ -356,8 +446,13 @@ auto init(const std::string_view &deviceName,
     ble_hs_cfg.gatts_register_cb = nullptr;
     ble_hs_cfg.store_status_cb = nullptr;
 
-    /* Configure security manager for passkey authentication */
-    configureSecurityManager();
+    /* Configure security manager: enable bonding + MITM, allow SC if supported */
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY; // Display-only: we show a passkey
+    ble_hs_cfg.sm_bonding = 1;                      // Enable bonding so phones remember pairing
+    ble_hs_cfg.sm_mitm = 1;                         // Require MITM (passkey/NumericCompare)
+    ble_hs_cfg.sm_sc = 1;                           // Prefer LE Secure Connections if peer supports
+    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
     ble_svc_gap_init();
     ble_svc_gatt_init();

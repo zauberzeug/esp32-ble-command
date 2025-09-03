@@ -9,5 +9,6 @@ REQUIRES
 PRIV_REQUIRES
     bt
     esp32-zeug
+    nvs_flash
 )
 component_compile_options(-std=gnu++17 -Wsuggest-override)

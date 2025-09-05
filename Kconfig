@@ -21,4 +21,18 @@ config ZZ_BLE_COM_SEND_CHR_UUID
     help
         UUID of the readable characteristic. Replies are always only sent via notifications, so do not perform reads on it.
 
+config ZZ_BLE_DEV_PIN
+    string
+    prompt "Developer PIN"
+    default "999999"
+    help
+        Hardcoded developer PIN for system access. This PIN provides administrative access to the device.
+
+config ZZ_BLE_INTEGRATION_LIZARD
+    bool "Enable Lizard storage integration"
+    default y
+    help
+        If enabled, this component integrates with Lizard's Storage to manage the user PIN.
+        Disable to build this component standalone without Lizard dependencies.
+
 endmenu

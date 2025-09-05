@@ -32,6 +32,10 @@
 
 #include "sdkconfig.h"
 
+#ifdef CONFIG_ZZ_BLE_INTEGRATION_LIZARD
+#include "../../main/storage.h"
+#endif
+
 namespace ZZ::BleCommand {
 
 // Helper: build UUIDs from strings without relying on user-defined literals
@@ -57,9 +61,31 @@ static constexpr ble_uuid128_t characteristicUuid = uuid128_from_str(CONFIG_ZZ_B
 static constexpr ble_uuid128_t notifyCharaUuid = uuid128_from_str(CONFIG_ZZ_BLE_COM_SEND_CHR_UUID);
 static constexpr esp_power_level_t defaultPowerLevel{ESP_PWR_LVL_P9};
 
-/* PIN authentication constants */
-static constexpr std::uint32_t masterPin{999999}; // Master key for developers
-static constexpr std::uint32_t userPin{123456};   // User key (will be configurable via NVS later)
+/* PIN authentication helper functions */
+static bool getDevPin(std::uint32_t &pin) {
+    // Get dev PIN from config - no defaults for security!
+#ifdef CONFIG_ZZ_BLE_DEV_PIN
+    pin = std::stoul(CONFIG_ZZ_BLE_DEV_PIN);
+    return true;
+#else
+    return false; // No dev PIN configured
+#endif
+}
+
+static bool getUserPin(std::uint32_t &pin) {
+#ifdef CONFIG_ZZ_BLE_INTEGRATION_LIZARD
+    // Get user PIN from storage - no defaults for security!
+    std::string userPin = Storage::get_user_pin();
+    if (userPin.empty()) {
+        return false; // No user PIN set
+    }
+    pin = std::stoul(userPin);
+    return true;
+#else
+    (void)pin;
+    return false;
+#endif
+}
 
 /* Range: 0x001B-0x00FB */
 static constexpr std::uint16_t txDataLength{0xFB};
@@ -156,6 +182,7 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
         // 0x13 = Remote user terminated connection
         // 0x16 = Connection terminated by local host
         // 0x3D = Connection failed due to authentication failure
+#if ZZ_BLE_DEBUG
         const char *reason_str = "";
         switch (event->disconnect.reason) {
         case 0x08:
@@ -181,6 +208,7 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
             break;
         }
         BLE_LOGI(TAG, "Reason: %d%s", event->disconnect.reason, reason_str);
+#endif
 
         if (event->disconnect.conn.conn_handle == l_currentCon) {
             l_currentCon = BLE_HS_CONN_HANDLE_NONE;
@@ -294,8 +322,22 @@ static auto onSecurityEvent(struct ble_gap_event *event, void *) -> int {
         BLE_LOGI(TAG, "Connection handle: %d", event->passkey.conn_handle);
 
         if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
-            // Use a fixed 6-digit passkey for now
-            constexpr uint32_t code = 123456u;
+            // Generate PIN based on available options - STRICT SECURITY: No defaults!
+            std::uint32_t code;
+            bool pinAvailable = false;
+
+            if (getUserPin(code)) {
+                pinAvailable = true;
+            } else if (getDevPin(code)) {
+                pinAvailable = true;
+            }
+
+            if (!pinAvailable) {
+                ESP_LOGE(TAG, "SECURITY ERROR: No PIN configured! Terminating connection.");
+                ble_gap_terminate(event->passkey.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                return 0;
+            }
+
             ESP_LOGI(TAG, "BLE PIN: %06lu", static_cast<unsigned long>(code));
 
             struct ble_sm_io pkey = {};
@@ -419,6 +461,9 @@ auto init(const std::string_view &deviceName,
 
     // Initialize persistent storage for NimBLE (required for bonding)
     ble_store_config_init();
+
+    // Note: BLE bonding limits are typically configured via menuconfig
+    // Default NimBLE stores 4 bonded devices and overwrites oldest when full
 
     /* Initialize the NimBLE host configuration. */
 

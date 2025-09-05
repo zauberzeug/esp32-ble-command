@@ -24,7 +24,6 @@ config ZZ_BLE_COM_SEND_CHR_UUID
 config ZZ_BLE_DEV_PIN
     string
     prompt "Developer PIN"
-    default "999999"
     help
         Hardcoded developer PIN for system access. This PIN provides administrative access to the device.
 

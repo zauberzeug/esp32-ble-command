@@ -65,22 +65,18 @@ static constexpr esp_power_level_t defaultPowerLevel{ESP_PWR_LVL_P9};
 static bool getDevPin(std::uint32_t &pin) {
     // Get dev PIN from config - no defaults for security!
 #ifdef CONFIG_ZZ_BLE_DEV_PIN
-    pin = std::stoul(CONFIG_ZZ_BLE_DEV_PIN);
+    pin = static_cast<std::uint32_t>(CONFIG_ZZ_BLE_DEV_PIN);
     return true;
 #else
+    (void)pin;
     return false; // No dev PIN configured
 #endif
 }
 
 static bool getUserPin(std::uint32_t &pin) {
 #ifdef CONFIG_ZZ_BLE_INTEGRATION_LIZARD
-    // Get user PIN from storage - no defaults for security!
-    std::string userPin = Storage::get_user_pin();
-    if (userPin.empty()) {
-        return false; // No user PIN set
-    }
-    pin = std::stoul(userPin);
-    return true;
+    // Get user PIN from storage (numeric)
+    return Storage::get_user_pin(pin);
 #else
     (void)pin;
     return false;
@@ -156,7 +152,7 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
             advertise();
         } else {
             /* Connection successful - enforce PIN authentication for all connections */
-            BLE_LOGI(TAG, "Connection established - enforcing mandatory PIN");
+            ESP_LOGI(TAG, "Connection established - enforcing mandatory PIN");
 
             // Small delay to let connection stabilize
             vTaskDelay(100 / portTICK_PERIOD_MS);
@@ -175,7 +171,7 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT: {
-        BLE_LOGI(TAG, "Device disconnected: reason=%d handle=%d", event->disconnect.reason, event->disconnect.conn.conn_handle);
+        ESP_LOGI(TAG, "Device disconnected: reason=%d handle=%d", event->disconnect.reason, event->disconnect.conn.conn_handle);
 
         // Common disconnect reasons:
         // 0x08 = Connection timeout
@@ -449,6 +445,9 @@ auto init(const std::string_view &deviceName,
     l_deviceName = decltype(l_deviceName)(deviceName);
     l_clientCallback = onCommand;
     l_running = true;
+
+    // Reduce noisy NimBLE INFO logs emitted under the "NimBLE" tag
+    esp_log_level_set("NimBLE", ESP_LOG_WARN);
 
     // Initialize NVS once at startup; do not erase bonds unconditionally
     esp_err_t nvs_rc = nvs_flash_init();

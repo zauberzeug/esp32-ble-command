@@ -447,13 +447,12 @@ auto init(const std::string_view &deviceName,
     l_running = true;
 
     // Reduce noisy NimBLE INFO logs emitted under the "NimBLE" tag
-    esp_log_level_set("NimBLE", ESP_LOG_WARN);
+    // esp_log_level_set("NimBLE", ESP_LOG_WARN);
 
     // Initialize NVS once at startup; do not erase bonds unconditionally
     esp_err_t nvs_rc = nvs_flash_init();
     if (nvs_rc == ESP_ERR_NVS_NO_FREE_PAGES || nvs_rc == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ESP_ERROR_CHECK(nvs_flash_init());
+        ESP_LOGW(TAG, "NVS is full.");
     }
 
     nimble_port_init();

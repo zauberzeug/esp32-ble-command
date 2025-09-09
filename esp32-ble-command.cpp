@@ -33,12 +33,12 @@
 #include "sdkconfig.h"
 
 #ifdef CONFIG_ZZ_BLE_INTEGRATION_LIZARD
+// for standalone usage
 #include "../../main/storage.h"
 #endif
 
 namespace ZZ::BleCommand {
 
-// Helper: build UUIDs from strings without relying on user-defined literals
 constexpr ble_uuid128_t uuid128_from_str(const char *str) {
     ble_uuid128_t result{BLE_UUID_TYPE_128, {0}};
     ZZ::Ble::Uuid::parse(std::string_view{str}, result.value, 16);
@@ -61,21 +61,18 @@ static constexpr ble_uuid128_t characteristicUuid = uuid128_from_str(CONFIG_ZZ_B
 static constexpr ble_uuid128_t notifyCharaUuid = uuid128_from_str(CONFIG_ZZ_BLE_COM_SEND_CHR_UUID);
 static constexpr esp_power_level_t defaultPowerLevel{ESP_PWR_LVL_P9};
 
-/* PIN authentication helper functions */
 static bool getDevPin(std::uint32_t &pin) {
-    // Get dev PIN from config - no defaults for security!
 #ifdef CONFIG_ZZ_BLE_DEV_PIN
     pin = static_cast<std::uint32_t>(CONFIG_ZZ_BLE_DEV_PIN);
     return true;
 #else
     (void)pin;
-    return false; // No dev PIN configured
+    return false;
 #endif
 }
 
 static bool getUserPin(std::uint32_t &pin) {
 #ifdef CONFIG_ZZ_BLE_INTEGRATION_LIZARD
-    // Get user PIN from storage (numeric)
     return Storage::get_user_pin(pin);
 #else
     (void)pin;
@@ -131,7 +128,7 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         /* A new connection was established or a connection attempt failed. */
-        BLE_LOGV(TAG, "connection %s; status=%d",
+        ESP_LOGV(TAG, "connection %s; status=%d",
                  event->connect.status == 0 ? "established" : "failed",
                  event->connect.status);
 
@@ -154,14 +151,11 @@ static auto onGapEvent(struct ble_gap_event *event, void *) -> int {
             /* Connection successful - enforce PIN authentication for all connections */
             ESP_LOGI(TAG, "Connection established - enforcing mandatory PIN");
 
-            // Small delay to let connection stabilize
             vTaskDelay(100 / portTICK_PERIOD_MS);
 
-            // Always initiate security
             int rc = ble_gap_security_initiate(event->connect.conn_handle);
             if (rc != 0) {
                 ESP_LOGW(TAG, "Failed to initiate PIN security: %d", rc);
-                // Immediately disconnect if we cannot enforce security
                 ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
                 ESP_LOGW(TAG, "Connection terminated - security enforcement failed");
             } else {
@@ -318,7 +312,6 @@ static auto onSecurityEvent(struct ble_gap_event *event, void *) -> int {
         BLE_LOGI(TAG, "Connection handle: %d", event->passkey.conn_handle);
 
         if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
-            // Generate PIN based on available options - STRICT SECURITY: No defaults!
             std::uint32_t code;
             bool pinAvailable = false;
 
@@ -342,7 +335,6 @@ static auto onSecurityEvent(struct ble_gap_event *event, void *) -> int {
             ble_sm_inject_io(event->passkey.conn_handle, &pkey);
 
         } else if (event->passkey.params.action == BLE_SM_IOACT_INPUT) {
-            // We are display-only; ignore INPUT requests
             BLE_LOGW(TAG, "Peer requested INPUT, but device is display-only; ignoring");
 
         } else if (event->passkey.params.action == BLE_SM_IOACT_NUMCMP) {
@@ -397,7 +389,6 @@ static const Ble::Gatts::Service lizardComService{
             characteristicUuid,
             BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
             [](std::uint16_t conn_handle, std::uint16_t attr_handle, ble_gatt_access_ctxt *ctx) -> int {
-                // CRITICAL SECURITY CHECK: Verify connection is encrypted before processing commands
                 struct ble_gap_conn_desc desc;
                 int rc = ble_gap_conn_find(conn_handle, &desc);
                 if (rc != 0) {
@@ -446,10 +437,6 @@ auto init(const std::string_view &deviceName,
     l_clientCallback = onCommand;
     l_running = true;
 
-    // Reduce noisy NimBLE INFO logs emitted under the "NimBLE" tag
-    // esp_log_level_set("NimBLE", ESP_LOG_WARN);
-
-    // Initialize NVS once at startup; do not erase bonds unconditionally
     esp_err_t nvs_rc = nvs_flash_init();
     if (nvs_rc == ESP_ERR_NVS_NO_FREE_PAGES || nvs_rc == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_LOGW(TAG, "NVS is full.");
@@ -457,14 +444,10 @@ auto init(const std::string_view &deviceName,
 
     nimble_port_init();
 
-    // Initialize persistent storage for NimBLE (required for bonding)
+    /* Initialize persistent storage for NimBLE (required for bonding) */
     ble_store_config_init();
 
-    // Note: BLE bonding limits are typically configured via menuconfig
-    // Default NimBLE stores 4 bonded devices and overwrites oldest when full
-
     /* Initialize the NimBLE host configuration. */
-
     ble_hs_cfg.reset_cb = [](int reason) {
         ESP_LOGV(TAG, "Resetting state; reason=%d", reason);
     };
